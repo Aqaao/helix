@@ -1097,7 +1097,11 @@ pub struct Editor {
     pub cursor_cache: CursorCache,
 }
 
-pub type Motion = Box<dyn Fn(&mut Editor)>;
+pub type Motion = Box<dyn Fn(&mut Editor, MotionMode)>;
+pub enum MotionMode {
+    Normal,
+    Inverse,
+}
 
 #[derive(Debug)]
 pub enum EditorEvent {
@@ -1229,19 +1233,29 @@ impl Editor {
             || self.config().popup_border == PopupBorderConfig::Menu
     }
 
-    pub fn apply_motion<F: Fn(&mut Self) + 'static>(&mut self, motion: F) {
-        motion(self);
+    pub fn apply_motion<F: Fn(&mut Self, MotionMode) + 'static>(&mut self, motion: F) {
+        motion(self, MotionMode::Normal);
         self.last_motion = Some(Box::new(motion));
     }
 
     pub fn repeat_last_motion(&mut self, count: usize) {
         if let Some(motion) = self.last_motion.take() {
             for _ in 0..count {
-                motion(self);
+                motion(self, MotionMode::Normal);
             }
             self.last_motion = Some(motion);
         }
     }
+    
+    pub fn inverse_repeat_last_motion(&mut self, count: usize) {
+        if let Some(motion) = self.last_motion.take() {
+            for _ in 0..count {
+                motion(self, MotionMode::Inverse);
+            }
+            self.last_motion = Some(motion);
+        }
+    }
+    
     /// Current editing mode for the [`Editor`].
     pub fn mode(&self) -> Mode {
         self.mode

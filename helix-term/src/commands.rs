@@ -40,7 +40,7 @@ use helix_core::{
 };
 use helix_view::{
     document::{FormatterError, Mode, SCRATCH_BUFFER_NAME},
-    editor::Action,
+    editor::{Action, MotionMode},
     info::Info,
     input::KeyEvent,
     keyboard::KeyCode,
@@ -328,6 +328,7 @@ impl MappableCommand {
         extend_till_prev_char, "Extend till previous occurrence of char",
         extend_prev_char, "Extend to previous occurrence of char",
         repeat_last_motion, "Repeat last motion",
+        inverse_repeat_last_motion, "Inverse Repeat last motion",
         replace, "Replace with new char",
         switch_case, "Switch (toggle) case",
         switch_to_uppercase, "Switch to uppercase",
@@ -1191,13 +1192,16 @@ fn move_next_sub_word_end(cx: &mut Context) {
     move_word_impl(cx, movement::move_next_sub_word_end)
 }
 
-fn goto_para_impl<F>(cx: &mut Context, move_fn: F)
-where
-    F: Fn(RopeSlice, Range, usize, Movement) -> Range + 'static,
-{
+fn goto_para_impl(cx: &mut Context, direction: Direction) {
     let count = cx.count();
-    let motion = move |editor: &mut Editor| {
+    let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
         let (view, doc) = current!(editor);
+        let move_fn = match (direction,motion_mode) {
+            (Direction::Forward, MotionMode::Normal) | (Direction::Backward, MotionMode::Inverse)  => 
+                movement::move_next_paragraph,
+            (Direction::Backward, MotionMode::Normal) | (Direction::Forward, MotionMode::Inverse) => 
+                movement::move_prev_paragraph,
+        };
         let text = doc.text().slice(..);
         let behavior = if editor.mode == Mode::Select {
             Movement::Extend
@@ -1215,11 +1219,11 @@ where
 }
 
 fn goto_prev_paragraph(cx: &mut Context) {
-    goto_para_impl(cx, movement::move_prev_paragraph)
+    goto_para_impl(cx, Direction::Backward)
 }
 
 fn goto_next_paragraph(cx: &mut Context) {
-    goto_para_impl(cx, movement::move_next_paragraph)
+    goto_para_impl(cx, Direction::Forward)
 }
 
 fn goto_file_start(cx: &mut Context) {
@@ -1507,14 +1511,12 @@ fn find_char(cx: &mut Context, direction: Direction, inclusive: bool, extend: bo
             } => ch,
             _ => return,
         };
-        let motion = move |editor: &mut Editor| {
-            match direction {
-                Direction::Forward => {
-                    find_char_impl(editor, &find_next_char_impl, inclusive, extend, ch, count)
-                }
-                Direction::Backward => {
+        let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
+            match (direction, motion_mode) {
+                (Direction::Forward, MotionMode::Normal) | (Direction::Backward, MotionMode::Inverse)  => 
+                    find_char_impl(editor, &find_next_char_impl, inclusive, extend, ch, count),
+                (Direction::Backward, MotionMode::Normal) | (Direction::Forward, MotionMode::Inverse) => 
                     find_char_impl(editor, &find_prev_char_impl, inclusive, extend, ch, count)
-                }
             };
         };
 
@@ -1630,6 +1632,10 @@ fn extend_prev_char(cx: &mut Context) {
 
 fn repeat_last_motion(cx: &mut Context) {
     cx.editor.repeat_last_motion(cx.count())
+}
+
+fn inverse_repeat_last_motion(cx: &mut Context) {
+    cx.editor.inverse_repeat_last_motion(cx.count())
 }
 
 fn replace(cx: &mut Context) {
@@ -3698,7 +3704,7 @@ fn goto_last_diag(cx: &mut Context) {
 }
 
 fn goto_next_diag(cx: &mut Context) {
-    let motion = move |editor: &mut Editor| {
+    let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
         let (view, doc) = current!(editor);
 
         let cursor_pos = doc
@@ -3725,7 +3731,7 @@ fn goto_next_diag(cx: &mut Context) {
 }
 
 fn goto_prev_diag(cx: &mut Context) {
-    let motion = move |editor: &mut Editor| {
+    let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
         let (view, doc) = current!(editor);
 
         let cursor_pos = doc
@@ -3791,7 +3797,7 @@ fn goto_prev_change(cx: &mut Context) {
 
 fn goto_next_change_impl(cx: &mut Context, direction: Direction) {
     let count = cx.count() as u32 - 1;
-    let motion = move |editor: &mut Editor| {
+    let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
         let (view, doc) = current!(editor);
         let doc_text = doc.text().slice(..);
         let diff_handle = if let Some(diff_handle) = doc.diff_handle() {
@@ -5075,7 +5081,7 @@ fn reverse_selection_contents(cx: &mut Context) {
 // tree sitter node selection
 
 fn expand_selection(cx: &mut Context) {
-    let motion = |editor: &mut Editor| {
+    let motion = |editor: &mut Editor, motion_mode: MotionMode| {
         let (view, doc) = current!(editor);
 
         if let Some(syntax) = doc.syntax() {
@@ -5097,7 +5103,7 @@ fn expand_selection(cx: &mut Context) {
 }
 
 fn shrink_selection(cx: &mut Context) {
-    let motion = |editor: &mut Editor| {
+    let motion = |editor: &mut Editor, motion_mode: MotionMode| {
         let (view, doc) = current!(editor);
         let current_selection = doc.selection(view.id);
         // try to restore previous selection
@@ -5124,7 +5130,7 @@ fn select_sibling_impl<F>(cx: &mut Context, sibling_fn: F)
 where
     F: Fn(&helix_core::Syntax, RopeSlice, Selection) -> Selection + 'static,
 {
-    let motion = move |editor: &mut Editor| {
+    let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
         let (view, doc) = current!(editor);
 
         if let Some(syntax) = doc.syntax() {
@@ -5146,7 +5152,7 @@ fn select_prev_sibling(cx: &mut Context) {
 }
 
 fn move_node_bound_impl(cx: &mut Context, dir: Direction, movement: Movement) {
-    let motion = move |editor: &mut Editor| {
+    let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
         let (view, doc) = current!(editor);
 
         if let Some(syntax) = doc.syntax() {
@@ -5199,7 +5205,7 @@ where
 }
 
 fn select_all_siblings(cx: &mut Context) {
-    let motion = |editor: &mut Editor| {
+    let motion = |editor: &mut Editor, motion_mode: MotionMode| {
         select_all_impl(editor, object::select_all_siblings);
     };
 
@@ -5207,7 +5213,7 @@ fn select_all_siblings(cx: &mut Context) {
 }
 
 fn select_all_children(cx: &mut Context) {
-    let motion = |editor: &mut Editor| {
+    let motion = |editor: &mut Editor, motion_mode: MotionMode| {
         select_all_impl(editor, object::select_all_children);
     };
 
@@ -5470,7 +5476,7 @@ fn scroll_down(cx: &mut Context) {
 
 fn goto_ts_object_impl(cx: &mut Context, object: &'static str, direction: Direction) {
     let count = cx.count();
-    let motion = move |editor: &mut Editor| {
+    let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
         let (view, doc) = current!(editor);
         if let Some((lang_config, syntax)) = doc.language_config().zip(doc.syntax()) {
             let text = doc.text().slice(..);
@@ -5570,7 +5576,7 @@ fn select_textobject(cx: &mut Context, objtype: textobject::TextObject) {
     cx.on_next_key(move |cx, event| {
         cx.editor.autoinfo = None;
         if let Some(ch) = event.char() {
-            let textobject = move |editor: &mut Editor| {
+            let textobject = move |editor: &mut Editor, motion_mode: MotionMode| {
                 let (view, doc) = current!(editor);
                 let text = doc.text().slice(..);
 
