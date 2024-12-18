@@ -328,7 +328,7 @@ impl MappableCommand {
         extend_till_prev_char, "Extend till previous occurrence of char",
         extend_prev_char, "Extend to previous occurrence of char",
         repeat_last_motion, "Repeat last motion",
-        inverse_repeat_last_motion, "Inverse Repeat last motion",
+        inverse_repeat_last_motion, "Inverse repeat last motion",
         replace, "Replace with new char",
         switch_case, "Switch (toggle) case",
         switch_to_uppercase, "Switch to uppercase",
