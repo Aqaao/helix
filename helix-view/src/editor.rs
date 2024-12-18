@@ -1098,6 +1098,7 @@ pub struct Editor {
 }
 
 pub type Motion = Box<dyn Fn(&mut Editor, MotionMode)>;
+#[derive(PartialEq)]
 pub enum MotionMode {
     Normal,
     Inverse,

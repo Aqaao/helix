@@ -3693,6 +3693,7 @@ fn goto_first_diag(cx: &mut Context) {
 }
 
 fn goto_last_diag(cx: &mut Context) {
+    
     let (view, doc) = current!(cx.editor);
     let selection = match doc.diagnostics().last() {
         Some(diag) => Selection::single(diag.range.start, diag.range.end),
@@ -3703,60 +3704,63 @@ fn goto_last_diag(cx: &mut Context) {
         .immediately_show_diagnostic(doc, view.id);
 }
 
-fn goto_next_diag(cx: &mut Context) {
+fn goto_diag_impl(cx: &mut Context, dir: Direction) {
     let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
         let (view, doc) = current!(editor);
-
+        
         let cursor_pos = doc
             .selection(view.id)
             .primary()
             .cursor(doc.text().slice(..));
-
-        let diag = doc
-            .diagnostics()
-            .iter()
-            .find(|diag| diag.range.start > cursor_pos)
-            .or_else(|| doc.diagnostics().first());
-
-        let selection = match diag {
-            Some(diag) => Selection::single(diag.range.start, diag.range.end),
-            None => return,
+        
+        let dir = match (dir,motion_mode) {
+            (Direction::Forward, MotionMode::Normal) | (Direction::Backward, MotionMode::Inverse) => Direction::Forward,
+            (Direction::Backward, MotionMode::Normal) | (Direction::Forward, MotionMode::Inverse) => Direction::Backward,
         };
+
+        let selection = match dir {
+            Direction::Forward => {
+                let diag = doc
+                    .diagnostics()
+                    .iter()
+                    .find(|diag| diag.range.start > cursor_pos)
+                    .or_else(|| doc.diagnostics().first());
+                match diag {
+                    Some(diag) => Selection::single(diag.range.start, diag.range.end),
+                    None => return,
+                }
+            },
+            Direction::Backward => {
+                let diag = doc
+                    .diagnostics()
+                    .iter()
+                    .rev()
+                    .find(|diag| diag.range.start < cursor_pos)
+                    .or_else(|| doc.diagnostics().last());
+
+                match diag {
+                    // NOTE: the selection is reversed because we're jumping to the
+                    // previous diagnostic.
+                    Some(diag) => Selection::single(diag.range.end, diag.range.start),
+                    None => return,
+                }
+            }
+        };
+        
         doc.set_selection(view.id, selection);
         view.diagnostics_handler
             .immediately_show_diagnostic(doc, view.id);
+        
     };
-
     cx.editor.apply_motion(motion);
 }
 
+fn goto_next_diag(cx: &mut Context) {
+    goto_diag_impl(cx, Direction::Forward);
+}
+
 fn goto_prev_diag(cx: &mut Context) {
-    let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
-        let (view, doc) = current!(editor);
-
-        let cursor_pos = doc
-            .selection(view.id)
-            .primary()
-            .cursor(doc.text().slice(..));
-
-        let diag = doc
-            .diagnostics()
-            .iter()
-            .rev()
-            .find(|diag| diag.range.start < cursor_pos)
-            .or_else(|| doc.diagnostics().last());
-
-        let selection = match diag {
-            // NOTE: the selection is reversed because we're jumping to the
-            // previous diagnostic.
-            Some(diag) => Selection::single(diag.range.end, diag.range.start),
-            None => return,
-        };
-        doc.set_selection(view.id, selection);
-        view.diagnostics_handler
-            .immediately_show_diagnostic(doc, view.id);
-    };
-    cx.editor.apply_motion(motion)
+    goto_diag_impl(cx, Direction::Backward);
 }
 
 fn goto_first_change(cx: &mut Context) {
@@ -3806,7 +3810,11 @@ fn goto_next_change_impl(cx: &mut Context, direction: Direction) {
             editor.set_status("Diff is not available in current buffer");
             return;
         };
-
+        let direction = match (direction, motion_mode) {
+            (Direction::Forward, MotionMode::Normal) | (Direction::Backward, MotionMode::Inverse) => Direction::Forward,
+            (Direction::Backward, MotionMode::Normal) | (Direction::Forward, MotionMode::Inverse) => Direction::Backward,
+        };
+        
         let selection = doc.selection(view.id).clone().transform(|range| {
             let cursor_line = range.cursor_line(doc_text) as u32;
 
@@ -5080,57 +5088,78 @@ fn reverse_selection_contents(cx: &mut Context) {
 
 // tree sitter node selection
 
-fn expand_selection(cx: &mut Context) {
-    let motion = |editor: &mut Editor, motion_mode: MotionMode| {
+fn expand_selection_impl(view: &mut View, doc: &mut Document) {
+    if let Some(syntax) = doc.syntax() {
+        let text = doc.text().slice(..);
+
+        let current_selection = doc.selection(view.id);
+        let selection = object::expand_selection(syntax, text, current_selection.clone());
+
+        // check if selection is different from the last one
+        if *current_selection != selection {
+            // save current selection so it can be restored using shrink_selection
+            view.object_selections.push(current_selection.clone());
+
+            doc.set_selection(view.id, selection);
+        }
+    }
+}
+
+fn shrink_selection_impl(view: &mut View, doc: &mut Document) {
+    let current_selection = doc.selection(view.id);
+    // try to restore previous selection
+    if let Some(prev_selection) = view.object_selections.pop() {
+        if current_selection.contains(&prev_selection) {
+            doc.set_selection(view.id, prev_selection);
+            return;
+        } else {
+            // clear existing selection as they can't be shrunk to anyway
+            view.object_selections.clear();
+        }
+    }
+    // if not previous selection, shrink to first child
+    if let Some(syntax) = doc.syntax() {
+        let text = doc.text().slice(..);
+        let selection = object::shrink_selection(syntax, text, current_selection.clone());
+        doc.set_selection(view.id, selection);
+    }
+}
+
+#[derive(Copy, Clone)]
+enum AdjustSelectionStrategy {
+    Shrink,
+    Expand,
+}
+
+fn adjust_selection(cx: &mut Context, strategy: AdjustSelectionStrategy) {
+    let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
         let (view, doc) = current!(editor);
 
-        if let Some(syntax) = doc.syntax() {
-            let text = doc.text().slice(..);
-
-            let current_selection = doc.selection(view.id);
-            let selection = object::expand_selection(syntax, text, current_selection.clone());
-
-            // check if selection is different from the last one
-            if *current_selection != selection {
-                // save current selection so it can be restored using shrink_selection
-                view.object_selections.push(current_selection.clone());
-
-                doc.set_selection(view.id, selection);
-            }
-        }
+        match (strategy, motion_mode) {
+            (AdjustSelectionStrategy::Expand, MotionMode::Normal) | (AdjustSelectionStrategy::Shrink, MotionMode::Inverse) =>
+                expand_selection_impl(view, doc),
+            (AdjustSelectionStrategy::Shrink, MotionMode::Normal) | (AdjustSelectionStrategy::Expand, MotionMode::Inverse) =>
+                shrink_selection_impl(view, doc),
+        };
     };
     cx.editor.apply_motion(motion);
+}
+
+fn expand_selection(cx: &mut Context) {
+    adjust_selection(cx, AdjustSelectionStrategy::Expand);
 }
 
 fn shrink_selection(cx: &mut Context) {
-    let motion = |editor: &mut Editor, motion_mode: MotionMode| {
-        let (view, doc) = current!(editor);
-        let current_selection = doc.selection(view.id);
-        // try to restore previous selection
-        if let Some(prev_selection) = view.object_selections.pop() {
-            if current_selection.contains(&prev_selection) {
-                doc.set_selection(view.id, prev_selection);
-                return;
-            } else {
-                // clear existing selection as they can't be shrunk to anyway
-                view.object_selections.clear();
-            }
-        }
-        // if not previous selection, shrink to first child
-        if let Some(syntax) = doc.syntax() {
-            let text = doc.text().slice(..);
-            let selection = object::shrink_selection(syntax, text, current_selection.clone());
-            doc.set_selection(view.id, selection);
-        }
-    };
-    cx.editor.apply_motion(motion);
+    adjust_selection(cx, AdjustSelectionStrategy::Shrink);
 }
 
-fn select_sibling_impl<F>(cx: &mut Context, sibling_fn: F)
-where
-    F: Fn(&helix_core::Syntax, RopeSlice, Selection) -> Selection + 'static,
-{
+fn select_sibling_impl(cx: &mut Context, dir: Direction ) {
     let motion = move |editor: &mut Editor, motion_mode: MotionMode| {
+        let sibling_fn = match (dir, motion_mode) {
+            (Direction::Forward, MotionMode::Normal) | (Direction::Backward, MotionMode::Inverse) => object::select_next_sibling,
+            (Direction::Backward, MotionMode::Normal) | (Direction::Forward, MotionMode::Inverse) => object::select_prev_sibling,
+        };
+        
         let (view, doc) = current!(editor);
 
         if let Some(syntax) = doc.syntax() {
@@ -5144,11 +5173,11 @@ where
 }
 
 fn select_next_sibling(cx: &mut Context) {
-    select_sibling_impl(cx, object::select_next_sibling)
+    select_sibling_impl(cx, Direction::Forward)
 }
 
 fn select_prev_sibling(cx: &mut Context) {
-    select_sibling_impl(cx, object::select_prev_sibling)
+    select_sibling_impl(cx, Direction::Backward)
 }
 
 fn move_node_bound_impl(cx: &mut Context, dir: Direction, movement: Movement) {
@@ -5158,6 +5187,10 @@ fn move_node_bound_impl(cx: &mut Context, dir: Direction, movement: Movement) {
         if let Some(syntax) = doc.syntax() {
             let text = doc.text().slice(..);
             let current_selection = doc.selection(view.id);
+            let dir = match (dir,motion_mode) {
+                (Direction::Forward, MotionMode::Normal) | (Direction::Backward, MotionMode::Inverse) => Direction::Forward,
+                (Direction::Backward, MotionMode::Normal) | (Direction::Forward, MotionMode::Inverse) => Direction::Backward,
+            };
 
             let selection = movement::move_parent_node_end(
                 syntax,
@@ -5206,6 +5239,9 @@ where
 
 fn select_all_siblings(cx: &mut Context) {
     let motion = |editor: &mut Editor, motion_mode: MotionMode| {
+        if motion_mode != MotionMode::Normal {
+            return;
+        }
         select_all_impl(editor, object::select_all_siblings);
     };
 
@@ -5214,6 +5250,9 @@ fn select_all_siblings(cx: &mut Context) {
 
 fn select_all_children(cx: &mut Context) {
     let motion = |editor: &mut Editor, motion_mode: MotionMode| {
+        if motion_mode != MotionMode::Normal {
+            return;
+        }
         select_all_impl(editor, object::select_all_children);
     };
 
@@ -5481,6 +5520,10 @@ fn goto_ts_object_impl(cx: &mut Context, object: &'static str, direction: Direct
         if let Some((lang_config, syntax)) = doc.language_config().zip(doc.syntax()) {
             let text = doc.text().slice(..);
             let root = syntax.tree().root_node();
+            let direction = match (direction,motion_mode) {
+                (Direction::Forward, MotionMode::Normal) | (Direction::Backward, MotionMode::Inverse) => Direction::Forward,
+                (Direction::Backward, MotionMode::Normal) | (Direction::Forward, MotionMode::Inverse) => Direction::Backward,
+            };
 
             let selection = doc.selection(view.id).clone().transform(|range| {
                 let new_range = movement::goto_treesitter_object(
@@ -5577,6 +5620,9 @@ fn select_textobject(cx: &mut Context, objtype: textobject::TextObject) {
         cx.editor.autoinfo = None;
         if let Some(ch) = event.char() {
             let textobject = move |editor: &mut Editor, motion_mode: MotionMode| {
+                if motion_mode != MotionMode::Normal {
+                    return;
+                }
                 let (view, doc) = current!(editor);
                 let text = doc.text().slice(..);
 
